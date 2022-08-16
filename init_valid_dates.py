@@ -6,7 +6,8 @@ import xarray as xr
 
 from pathlib import Path
 
-basepath = Path('/data/volume_2/subseasonal/ecmwf')
+basepath = Path('/data/volume_2/subseasonal/ecmwf/raw')
+aggpath = Path('/data/volume_2/subseasonal/ecmwf/aggregated')
 
 dataframes = []
 for forctype in ['hindcast','forecast']:
@@ -24,5 +25,5 @@ print('testfile:')
 print(selection.dims,' : ',selection.shape)
 
 dataframes = pd.concat(dataframes, axis = 0)
-dataframes.to_hdf(basepath / 'aggregated' / 'aggregation_timestamps.h5', key = 'aggregation_timestamps', mode = 'w')
+dataframes.to_hdf(aggpath / 'aggregation_timestamps.h5', key = 'aggregation_timestamps', mode = 'w')
 

@@ -39,7 +39,7 @@ def create_url(forecasttype, init_date, center, varname):
 def create_local_path(forecasttype, init_date, center, varname):
     filename = create_filename(forecasttype = forecasttype, init_date = init_date, center = center, varname = varname)
     #path = Path('/scistor/ivm/data_catalogue/climate_models/s2s/')
-    path = Path('/data/volume_2/subseasonal/')
+    path = Path('/data/volume_2/subseasonal/raw/')
     return path / center / forecasttype / filename
 
 def download(serverurl, localfile):
