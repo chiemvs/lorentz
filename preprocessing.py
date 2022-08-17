@@ -9,12 +9,16 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 # Only the observations/target is without leadtime
 # Shared time axis between obs and forecast is 'valid_time'
 
-# Computation of ensemble mean
+# Options:
+# Computation of ensemble mean 
 # Removal of seasonality (for any set, but based on training/hindcast, not on test/forecast set)
+# Standardization (spatial / per gridcell)
+# patch size determined, possibility to grab patch centered on the target region
+
+# Future TODO:
 # Selection of the right season
-# Standardization (spatial / per gridcell?)
-# patch size determined, possibility to grab only the target region, or get patches from everywhere (more samples, perhaps local standardization needed)
-# Output TfRecords? At least split between forecast and hindcast, perhaps also separately validation (because we don't want non-target region patches there).
+# Output TfRecords?
+# Approach crossvalidation differently? Forecast set is too limited for good test scores. Solving now with (nested)crossvalidation on hindcast
 
 
 def remove_seasonality(array, expectation = None):
@@ -144,8 +148,8 @@ def preprocess_target():
     return target_hindcast_binned, target_forecast_binned
 
 outdir = Path('/scratch/')
-experiment_name = 'setup_trial_no_ensmean'
-ensmean = False
+experiment_name = 'trial2_ensmean'
+ensmean = True
 varlist = ['tp','sst','tcw']
 
 # Construction of inputs
@@ -174,17 +178,18 @@ else:
 
 # processing target, checking correspondence of time axes
 target_h, target_f = preprocess_target()
-
+assert np.all(np.equal(target_h.valid_time.values, training_inputs.valid_time.values)), 'training timestamps must match'
+assert np.all(np.equal(target_f.valid_time.values, testing_inputs.valid_time.values)), 'testing timestamps must match'
 
 # Re-ordering and writing inputs to disk (only array, no coordinates, so directly readable with numpy
 # (nsamples,nchannels,nlat,nlon)
-np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose(['valid_time','channels','latitude','longitude']).values)
-np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose(['valid_time','channels','latitude','longitude']).values)
+np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose('valid_time','channels','latitude','longitude').values)
+np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose('valid_time','channels','latitude','longitude').values)
 
 # writing targets to disk
 np.save(file = outdir / f'{experiment_name}.training_terciles.npy', arr = target_h.values)
 np.save(file = outdir / f'{experiment_name}.testing_terciles.npy', arr = target_f.values)
 
 # Some extra time information
-#target_h.valid_time.to_pandas().to_hdf(
-
+target_h.valid_time.to_pandas().to_hdf(outdir / f'{experiment_name}.training_timestamps.h5', key = 'timestamps', mode = 'w')
+target_f.valid_time.to_pandas().to_hdf(outdir / f'{experiment_name}.testing_timestamps.h5', key = 'timestamps', mode = 'w')
