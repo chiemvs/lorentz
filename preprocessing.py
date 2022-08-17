@@ -7,10 +7,10 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 # All functions and data concern a single lead time, and a single 4-week time aggregation (pre-aggregated)
 # Only the observations/target is without leadtime
-# Shared time axis is 'valid_time'
+# Shared time axis between obs and forecast is 'valid_time'
 
 # Computation of ensemble mean
-# Removal of seasonality (for any set, but based on training, not on test set)
+# Removal of seasonality (for any set, but based on training/hindcast, not on test/forecast set)
 # Selection of the right season
 # Standardization (spatial / per gridcell?)
 # patch size determined, possibility to grab only the target region, or get patches from everywhere (more samples, perhaps local standardization needed)
@@ -45,7 +45,7 @@ def standardize_array(array, spatially = True, temporally = False, trained_scale
     Realization / members are always treated as samples, if present in the array. (otherwise a scaler trained on hindcasts (11 members) would not be applicable to forecasts (51 members))
     """
     assert (spatially or temporally) and (not(spatially and temporally)), 'choose one of spatial or temporal standardization'
-    print(f'scaling is {"spatial" if spatially else "temporal"}')
+    print(f'standardization is {"spatial" if spatially else "temporal"}')
     feature_dims = list(array.dims)
     if spatially:
         feature_dims.remove('latitude')
@@ -76,7 +76,7 @@ def select_centered_patch(array, patchsize: tuple = (40,40)):
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
-def preprocess_main(var: str = var, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40) ):
+def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40) ):
     """
     Patchsize in degrees (nlon,nlat), if fixed_patch, this is centered over the Horn of Africa
     Preprocessing should prevent data leakage from hindcasts to forecasts.
@@ -105,10 +105,86 @@ def preprocess_main(var: str = var, rm_season: bool = True, ensmean: bool = Fals
         
     return hindcast, forecast
 
+def preprocess_target():
+    """Currently not a target patch, just a scalar through spatial aggregation"""
+    datapath = Path('/data/volume_2/observational/')
+
+    chirps = xr.open_dataarray(datapath / 'preprocessed' / 'chirps_tp_2000-2020_4weekly_0.25deg_africa.nc')
+    mask = xr.open_dataarray(datapath / 'era5_hoa_dry_mask_0.25deg.nc')
+
+    mask = mask.reindex_like(chirps, method = 'nearest') # Same resolution but slightly different lats and lons
+    mask.name = 'mask' # True or False
+    spatial_avg = chirps.groupby(mask).mean().sel(mask = True)
+    spatial_avg.coords['month'] = ('valid_time', spatial_avg.coords['valid_time'].dt.month.values)
+
+    hindcast_forecast_split = pd.Timestamp('2020-01-16') # In terms of valid_time
+    target_hindcast = spatial_avg.sel(valid_time = slice(None,hindcast_forecast_split))
+    target_forecast = spatial_avg.sel(valid_time = slice(hindcast_forecast_split,None))
+    
+    tercile_edges = target_hindcast.groupby('month').quantile([0.33,0.66]) # Determined on hindcast (to prevent leakage to forecast), also per month to account for seasonality 
+
+    def lookup_month_and_digitize(array):
+        """ 
+        function to be mapped
+        2 = upper, 1 = middle, 0 = lower tercile
+        tercile boundaries have been previously computed on hindcast
+        """
+        month = int(np.unique(array.month.values))
+        #print(month)
+        edges = tercile_edges.loc[month].values
+        #print(edges)
+        #print(array.values)
+        binned = np.digitize(x = array, bins = edges)
+        #print(binned)
+        return xr.DataArray(binned, dims = array.dims, coords = array.coords)
+
+    target_hindcast_binned = target_hindcast.groupby('month').map(lookup_month_and_digitize)
+    target_forecast_binned = target_forecast.groupby('month').map(lookup_month_and_digitize)
+
+    return target_hindcast_binned, target_forecast_binned
+
+outdir = Path('/scratch/')
+experiment_name = 'setup_trial_no_ensmean'
+ensmean = False
 varlist = ['tp','sst','tcw']
-for var in varlist[-1:]:
+
+# Construction of inputs
+training_inputs = {key:[] for key in varlist}  # These will be hindcasts
+testing_inputs = {key:[] for key in varlist}  # These will be forecasts (though probably more testing data will be generated through crossvalidation of hindcasts)
+for var in varlist:
     if var == 'tp': # No seasonal anomalies
-        hindcast, forecast = preprocess_main(var = var, rm_season = False, ensmean = False, standardize_space = True) # Perhaps rainfall should be min-max scaled, such that zero is really zero?
+        hindcast, forecast = preprocess_ecmwf(var = var, rm_season = False, ensmean = ensmean, standardize_space = False, standardize_time = True) # No seasonal removal for rainfall? Perhaps rainfall should be min-max scaled, such that zero is really zero?
     else:
-        hindcast, forecast = preprocess_main(var = var, rm_season = True, ensmean = False, standardize_space = True)
+        hindcast, forecast = preprocess_ecmwf(var = var, rm_season = True, ensmean = ensmean, standardize_space = False, standardize_time = True)
+    training_inputs[var] = hindcast.expand_dims({'variable':[var]})
+    testing_inputs[var] = forecast.expand_dims({'variable':[var]})
+
+training_inputs = xr.concat(training_inputs.values(), dim = 'variable') # This already stacks the arrays into nchannels = nvariables 
+testing_inputs = xr.concat(testing_inputs.values(), dim = 'variable')
+
+# Extra stacking of channels, as multiple members available per variable
+if not ensmean:
+    nmembers = len(training_inputs.coords['realization'])
+    training_inputs = training_inputs.stack({'channels':['realization','variable']})
+    testing_inputs = testing_inputs.sel(realization = np.random.choice(testing_inputs.realization.values, size = nmembers, replace = False)) # Testing now needs to be matched in training, so downsampling the members to 11 (always select control?)
+    testing_inputs = testing_inputs.stack({'channels':['realization','variable']})
+else:
+    training_inputs = training_inputs.rename({'variable':'channels'})
+    testing_inputs = testing_inputs.rename({'variable':'channels'})
+
+# processing target, checking correspondence of time axes
+target_h, target_f = preprocess_target()
+
+
+# Re-ordering and writing inputs to disk (only array, no coordinates, so directly readable with numpy
+# (nsamples,nchannels,nlat,nlon)
+np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose(['valid_time','channels','latitude','longitude']).values)
+np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose(['valid_time','channels','latitude','longitude']).values)
+
+# writing targets to disk
+np.save(file = outdir / f'{experiment_name}.training_terciles.npy', arr = target_h.values)
+np.save(file = outdir / f'{experiment_name}.testing_terciles.npy', arr = target_f.values)
+
+# Some extra time information
+#target_h.valid_time.to_pandas().to_hdf(
 

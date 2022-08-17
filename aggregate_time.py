@@ -58,3 +58,22 @@ for var in variables:
             combined.to_netcdf(outpath)
         else:
             print(f'aggregated {outpath} already exists')
+
+# Target aggregation
+chirps = xr.open_dataarray('/data/volume_2/observational/raw/chirps_tp_1980-2021_daily_0.25deg_africa.nc')
+outpath = Path('/data/volume_2/observational/preprocessed/chirps_tp_2000-2020_4weekly_0.25deg_africa.nc')
+
+if not outpath.exists():
+    aggarray = xr.DataArray(np.full(shape = (len(timestamp_frame),) + chirps.shape[1:], fill_value = np.nan, dtype = np.float32), dims = ('valid_time','latitude','longitude'))
+    for key in ['latitude','longitude']:
+        aggarray.coords.update({key:chirps.coords[key]})
+    aggarray.coords.update({'valid_time':timestamp_frame.loc[:,'aggregation_start_inclusive'].sort_values().values}) # First days of the aggregation period
+    aggarray.attrs = chirps.attrs
+    aggarray.attrs.update({'units':'mm','time_step':'4_week_accumulation'}) # Original daily units are mm/day, so we can just sum over 4 weeks.
+    for i in range(len(timestamp_frame)):
+        start_inclusive, end_inclusive = timestamp_frame[['aggregation_start_inclusive','aggregation_end_inclusive']].iloc[i]
+        selection = chirps.sel(time = slice(start_inclusive, end_inclusive))
+        assert selection.shape[0] == 28, 'length of time period should be 28, check if daily chirps contains all aggregation stamps.'
+        aggarray.loc[start_inclusive,...] = selection.sum('time')
+        print(f'aggregated from {start_inclusive.strftime("%Y-%m-%d")}, to {end_inclusive.strftime("%Y-%m-%d")} ')
+    aggarray.to_netcdf(outpath)
