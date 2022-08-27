@@ -148,8 +148,8 @@ def preprocess_target():
     return target_hindcast_binned, target_forecast_binned
 
 outdir = Path('/scratch/')
-experiment_name = 'trial2_ensmean'
-ensmean = True
+experiment_name = 'trial1_no_ensmean'
+ensmean = False
 varlist = ['tp','sst','tcw']
 
 # Construction of inputs
@@ -182,9 +182,9 @@ assert np.all(np.equal(target_h.valid_time.values, training_inputs.valid_time.va
 assert np.all(np.equal(target_f.valid_time.values, testing_inputs.valid_time.values)), 'testing timestamps must match'
 
 # Re-ordering and writing inputs to disk (only array, no coordinates, so directly readable with numpy
-# (nsamples,nchannels,nlat,nlon)
-np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose('valid_time','channels','latitude','longitude').values)
-np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose('valid_time','channels','latitude','longitude').values)
+# (nsamples,nlat,nlon,nchannels)
+np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose('valid_time','latitude','longitude','channels').values)
+np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose('valid_time','latitude','longitude','channels').values)
 
 # writing targets to disk
 np.save(file = outdir / f'{experiment_name}.training_terciles.npy', arr = target_h.values)
