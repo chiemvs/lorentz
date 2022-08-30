@@ -5,23 +5,9 @@ import pandas as pd
 
 from pathlib import Path
 
-# Checking available experiments (each the name-giver of a set of pre-processed arrays written on the /scratch/)
-scratchdir = Path('/scratch')
-available_experiments = np.unique([p.parts[-1].split('.')[0] for p in scratchdir.glob('*.npy')])
-print('available experiments: ', available_experiments)
-
-# Loading of preprocessed data, check preprocessing.py for the options like removing seasonal cycle and normalization in time or space
-chosen_experiment = 'trial2_ensmean'
-print('chosen experiment: ', chosen_experiment)
-
 """
-Data loading, generating constant climatological probabilities
+generating constant climatological probabilities
 """
-train_inputs = np.load(scratchdir / f'{chosen_experiment}.training_inputs.npy') # (nsamples,nlat,nlon,nchannels), if ensmean then channels is just the number of variables, nlat & nlon depend on patch size
-train_target = np.load(scratchdir / f'{chosen_experiment}.training_terciles.npy') # Spatial average 4-week rainfall classified into terciles (2,1,0 = high,mid,low)
-
-test_inputs = np.load(scratchdir / f'{chosen_experiment}.testing_inputs.npy') # these are the forecasts that have been kept separate, technically we will probably not use them as test data, as it is only one year. We will do crossvalidation instead (perhaps after adding this extra year?)
-test_target = np.load(scratchdir / f'{chosen_experiment}.testing_terciles.npy')
 
 def generate_climprob_inputs(patchinputs, climprobs:np.ndarray):
     """
@@ -33,10 +19,6 @@ def generate_climprob_inputs(patchinputs, climprobs:np.ndarray):
     probs = np.repeat(climprobs[np.newaxis,...], repeats = patchinputs.shape[0], axis = 0)
     return np.log(probs) 
 
-n_classes = len(np.unique(train_target))
-clim_logprobs_train = generate_climprob_inputs(train_inputs, climprobs = np.repeat(1/n_classes, n_classes)) # 3 classes are assumed to be equiprobable terciles
-clim_logprobs_test = generate_climprob_inputs(test_inputs, climprobs = np.repeat(1/n_classes, n_classes))
-
 """
 CNN & Crossvalidation code goes below
 """
@@ -45,6 +27,13 @@ def earlystop(patience: int = 10, monitor: str = 'val_loss'):
         monitor=monitor, min_delta=0, patience=patience,
         verbose=1, mode='auto', restore_best_weights=True)
 
+DEFAULT_FIT = dict(batch_size = 32, epochs = 10, shuffle = True,  callbacks = [earlystop(patience = 7, monitor = 'val_loss')])
+
+DEFAULT_COMPILE = dict(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+            metrics = ['accuracy'],
+            loss = tf.keras.losses.CategoricalCrossentropy(from_logits = False))
+
+DEFAULT_CONSTRUCT = dict(n_classes = 3, n_initial_filters = 4, n_conv_blocks = 3, n_hidden_fcn_layers = 0, n_hidden_nodes = 10, dropout_rate = 0.3)
 
 def construct_climdev_cnn(n_classes: int, n_initial_filters: int, n_conv_blocks: int, n_hidden_fcn_layers: int, n_hidden_nodes: int, inputshape: tuple, dropout_rate: float = 0.3):
     """
@@ -77,17 +66,152 @@ def construct_climdev_cnn(n_classes: int, n_initial_filters: int, n_conv_blocks:
     return tf.keras.models.Model(inputs = [patch_input, log_p_clim], outputs = prob_dist)
 
 
-DEFAULT_FIT = dict(batch_size = 32, epochs = 100, shuffle = True,  callbacks = [earlystop(patience = 7, monitor = 'val_loss')])
+class ModelRegistry(object):
+    """
+    Creation of multiple models, training them on data (xdata, ydata)
+    xdata is a list of potentially multiple arrays (if network has multiple branches)
+    bookkeeping on the parts of the data seen
+    All models are created with the same hyperparameters
+    """
+    def __init__(self, xdata: list, ydata: np.ndarray, timestamps: pd.DatetimeIndex, compile_kwargs = DEFAULT_COMPILE, construct_kwargs = DEFAULT_CONSTRUCT, fit_kwargs = DEFAULT_FIT):
+        self.xdata = xdata # list of arrays, All data in memory (small datasets so no bottleneck)
+        self.ydata = ydata # Array
+        self.timestamps = timestamps
+        self.construct_kwargs = construct_kwargs
+        self.construct_kwargs.update({'inputshape':xdata[0].shape[1:]}) # Model needs knowledge about the patch size (first branch) to be constructed
+        self.compile_kwargs = compile_kwargs
+        self.fit_kwargs = fit_kwargs
+        self.xdata = xdata # List of objects
+        self.registry = [] # Containing the model objects
+        self.train_indices = [] # Containing the indices of samples on which a model gets trained
+        self.val_indices = [] # Containing the indices of validation samples
+        self.test_indices = [] # Containing the indices of test samples
+        self.histories = [] 
 
-DEFAULT_COMPILE = dict(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-            metrics = ['accuracy'],
-            loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits = False))
+    def __repr__(self):
+        return f'Registry of {len(self.registry)} models, containing \n {len(np.concatenate(self.train_indices))} training samples, \n {len(np.concatenate(self.val_indices))} validation samples, \n {len(np.concatenate(self.test_indices))} testing samples \n (with double counting)'
 
-cnn = construct_climdev_cnn(n_classes = n_classes, n_initial_filters = 4, n_conv_blocks = 3, n_hidden_fcn_layers = 0, n_hidden_nodes = 10, inputshape = train_inputs.shape[1:], dropout_rate = 0.3)
+    def initialize_untrained_model(self, train_indices: np.ndarray, val_indices: np.ndarray, test_indices: np.ndarray):
+        """
+        You already need to supply the indices of the portion of data you want to train/validate it on
+        test indices are for future reference
+        returns the index of the new model in the registry
+        """
+        model = construct_climdev_cnn(**self.construct_kwargs)
+        model.compile(**self.compile_kwargs)
+        self.registry.append(model)
+        self.train_indices.append(train_indices)
+        self.val_indices.append(val_indices)
+        self.test_indices.append(test_indices)
+        self.histories.append(None)
+        return len(self.registry) - 1
 
-cnn.compile(**DEFAULT_COMPILE)
+    def _get_indices(self, modelindex: int, what: str):
+        """
+        hidden method, what can be ['train', 'val', 'test']
+        """
+        indices = getattr(self, f'{what}_indices')[modelindex]
+        return indices
 
-history = cnn.fit(x = [train_inputs, clim_logprobs_train],
-                y = train_target,
-                validation_split=0.3,
-                **DEFAULT_FIT)
+    def train_model(self, modelindex: int):
+        """trains a model of choice"""
+        model = self.registry[modelindex]
+        train_idx = self._get_indices(modelindex,'train')
+        val_idx = self._get_indices(modelindex,'val')
+        xtrain = [data[train_idx,...] for data in self.xdata ] # List of arrays
+        xval = [data[val_idx,...] for data in self.xdata ] # List of arrays
+        ytrain = self.ydata[train_idx,...]
+        yval = self.ydata[val_idx,...]
+
+        history = model.fit(x = xtrain,
+                y = ytrain,
+                validation_data = (xval, yval),
+                **self.fit_kwargs)
+        self.histories[modelindex] = history.history
+
+    def build_curves(self):
+        """
+        Dataframe to gather the evolutions of validation and training losses / accuracies 
+        with the progressing of epochts. Uses sequences saved in the histories
+        """
+        dataframes = []
+        for modelindex in range(len(self.registry)):
+            history = self.histories[modelindex]
+            if not (history is None):
+                df = pd.DataFrame(history)
+                df.index = pd.MultiIndex.from_product([[modelindex],df.index + 1], names = ['modelindex','epoch'])
+                dataframes.append(df)
+        return pd.concat(dataframes, axis = 0)
+
+    def single_model_prediction(self, modelindex: int, what: str = 'val'):
+        """Single model method"""
+        model = self.registry[modelindex]
+        indices = self._get_indices(modelindex, what)
+        x = [data[indices,...] for data in self.xdata] # List of arrays
+        return model(x)
+
+    def make_predictions(self, what: str = 'val'):
+        """ all models at once """
+        predictions = [self.single_model_prediction(modelindex, what = what) for modelindex in range(len(self.registry))]
+        predictions = np.concatenate(predictions)
+        combined_indices = np.concatenate(getattr(self, f'{what}_indices'))
+        combined_stamps = self.timestamps[combined_indices]
+        return pd.DataFrame(predictions, index = combined_stamps)
+
+if __name__ == '__main__':
+    scratchdir = Path('/scratch')
+    # Loading of preprocessed data, check preprocessing.py for the options like removing seasonal cycle and normalization in time or space
+    chosen_experiment = 'trial2_ensmean'
+    """
+    Data loading, merging of the dataset. (for later crossvalidation)
+    """
+    train_inputs = np.load(scratchdir / f'{chosen_experiment}.training_inputs.npy') # (nsamples,nlat,nlon,nchannels), if ensmean then channels is just the number of variables, nlat & nlon depend on patch size
+    train_target = np.load(scratchdir / f'{chosen_experiment}.training_terciles.npy') # Spatial average 4-week rainfall classified into terciles, one hot encoded (low, mid, high)
+    train_timestamps = pd.read_hdf(scratchdir / f'{chosen_experiment}.training_timestamps.h5')
+    
+    test_inputs = np.load(scratchdir / f'{chosen_experiment}.testing_inputs.npy') # these are the forecasts that have been kept separate, technically we will probably not use them as test data, as it is only one year. We will do crossvalidation instead (perhaps after adding this extra year?)
+    test_target = np.load(scratchdir / f'{chosen_experiment}.testing_terciles.npy')
+    test_timestamps = pd.read_hdf(scratchdir / f'{chosen_experiment}.testing_timestamps.h5')
+    
+    full_inputs = np.concatenate([train_inputs, test_inputs], axis = 0) # Stacking along valid_time/sample dimension
+    full_target = np.concatenate([train_target, test_target], axis = 0) # Stacking along valid_time/sample dimension
+    full_timestamps = pd.concat([train_timestamps, test_timestamps])
+    
+    n_classes = full_target.shape[-1] 
+    full_clim_logprobs = generate_climprob_inputs(full_inputs, climprobs = np.repeat(1/n_classes, n_classes)) # 3 classes are assumed to be equiprobable terciles
+    
+    registry = ModelRegistry(xdata = [full_inputs, full_clim_logprobs], 
+            ydata = full_target, 
+            timestamps = full_timestamps.index,
+            compile_kwargs = DEFAULT_COMPILE, construct_kwargs = DEFAULT_CONSTRUCT, fit_kwargs = DEFAULT_FIT)
+    
+    # Leave one year out cross-validation (for testing)
+    # This leaves 21 years remaining, although there are not really 22 full years (2021 has only three samples)
+    # nested within this, a leave-three-years-out crossvalidation (meaning 7 folds)
+    years = full_timestamps.index.year.unique()
+    for test_year in years:
+        remaining_years = years.drop(test_year).sort_values() # sort to make sure that the next leaving out is blockwise
+        for validation_years in np.split(remaining_years, np.arange(3, len(remaining_years),3)):
+            training_years = years.drop(test_year).drop(validation_years)
+            print('test', test_year)
+            print('validation', validation_years)
+            print('training', training_years)
+            test_indices = np.where(full_timestamps.index.year == test_year)[0] # From boolean to numeric index
+            val_indices = np.where(full_timestamps.index.year.map(lambda y: y in validation_years))[0]
+            train_indices = np.where(full_timestamps.index.year.map(lambda y: y in training_years))[0]
+            modelindex = registry.initialize_untrained_model(train_indices = train_indices, val_indices = val_indices, test_indices = test_indices)
+            print(modelindex)
+            # Normally you would call train here. But there are a lot of models (6 min of training with 10 epochs)
+            registry.train_model(modelindex = modelindex)
+    
+    # Two examples of training
+    #registry.train_model(modelindex = 0)
+    #registry.train_model(modelindex = 5)
+    # And an example of the training curves, which are scores computed per set of predictions
+    curves = registry.build_curves()
+    
+    # But of course we are doing crossvalidation, which means that we first want to make a complete (joint) set of predictions, and compute scores once
+    # Verification is possible for a certain set all in one go
+    #valpreds = registry.make_predictions('val') # This contains predictions by untrained models
+    #verifying_obs = pd.DataFrame(full_target, index = full_timestamps.index, columns = pd.RangeIndex(n_classes, name = 'classes')) # This is the fullset, not yet one-hot-encoded
+    #verifying_obs = verifying_obs.reindex(valpreds.index) # Samples are in multiple validation sets so reindex to make obs align with preds
