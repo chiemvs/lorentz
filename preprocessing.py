@@ -87,7 +87,7 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
     """
     assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
-    var = 'tcw' 
+    #var = 'tcw'
     hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
     forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
 
