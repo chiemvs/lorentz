@@ -87,7 +87,6 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
     """
     assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
-    #var = 'tcw'
     hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
     forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
 
@@ -107,6 +106,21 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
         hindcast, trained_scaler = standardize_array(array = hindcast, spatially = standardize_space, temporally = standardize_time)
         forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
         
+    return hindcast, forecast
+
+def unprocessed_forecast(var: str, fixed_patch: bool = True, patchsize: tuple = (40,40), ensmean: bool = True):
+    assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
+    datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
+    hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
+    forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
+
+    # Patch selection, currently one of the early steps to limit memory usage
+    hindcast = select_centered_patch(hindcast, patchsize = patchsize)
+    forecast = select_centered_patch(forecast, patchsize = patchsize)
+    if ensmean:
+        hindcast = hindcast.mean('realization')
+        forecast = forecast.mean('realization')
+
     return hindcast, forecast
 
 def spatial_average_in_mask(array, maskname):
@@ -205,7 +219,7 @@ def preprocess_raw_forecasts(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile
         return hindcast_probabilities, forecast_probabilities
 
 if __name__  == '__main__': # Running as script, not calling from a notebook.
-    outdir = Path('/scratch/')
+    outdir = Path('/scratch/cvanstraat')
     experiment_name = 'trial2_ensmean'
     ensmean = True
     varlist = ['tp','sst','tcw']
