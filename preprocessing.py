@@ -91,7 +91,8 @@ def select_patch_specific_latlon(array,latmin,latmax,lonmin,lonmax):
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
-def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40),latmin:LAT1, latmax:LAT2, lonmin:LON1, lonmax:LON2):
+def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40)):
+    
     """
     Patchsize in degrees (nlon,nlat), if fixed_patch, this is centered over the Horn of Africa
     Preprocessing should prevent data leakage from hindcasts to forecasts.
@@ -122,6 +123,54 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
         forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
         
     return hindcast, forecast
+
+def preprocess_ecmwf_seasonal(latmin, latmax, lonmin, lonmax, season, var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True):
+    """
+    Preprocessing should prevent data leakage from hindcasts to forecasts.
+    """
+    
+    datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
+    #var = 'tcw'
+    hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
+    forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
+
+    # Patch selection, currently one of the early steps to limit memory usage
+    hindcast = select_patch_specific_latlon(hindcast, latmin=latmin,latmax=latmax,lonmin=lonmin,lonmax=lonmax)
+    forecast = select_patch_specific_latlon(forecast, latmin=latmin,latmax=latmax,lonmin=lonmin,lonmax=lonmax)
+
+    if rm_season:
+        hindcast, exp = remove_seasonality(hindcast)
+        forecast, _ = remove_seasonality(forecast, expectation = exp) # Will form the test set, so not used for seasonal expectations
+
+    if ensmean:
+        hindcast = hindcast.mean('realization')
+        forecast = forecast.mean('realization')
+
+    if standardize_space or standardize_time: # Standardizing spatially means that each valid time is its own feature, therefore no leakage from hindcast to forecast, and no supply of pretrained_scaler
+        hindcast, trained_scaler = standardize_array(array = hindcast, spatially = standardize_space, temporally = standardize_time)
+        forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
+        
+    # Subset the data by season.
+    if season == 'MAM':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([3,4,5]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([3,4,5]),drop=True)
+    elif season == 'OND':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([10,11,12]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([10,11,12]),drop=True)
+    elif season == 'JJAS':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([6,7,8,9]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([6,7,8,9]),drop=True)
+
+    elif season == 'JF':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([1,2]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([1,2]),drop=True)
+        
+    else:
+        print('season not defined so defaulted to full year')
+        hindcast_subset = hindcast
+        forecast_subset = forecast
+        
+    return hindcast_subset, forecast_subset
 
 def spatial_average_in_mask(array, maskname):
     """Finds masks in the observational directory """
