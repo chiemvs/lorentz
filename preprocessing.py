@@ -80,6 +80,51 @@ def select_centered_patch(array, patchsize: tuple = (40,40)):
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
+def select_patch(array, lons = (0, 360), lats = (90,-90)):
+    """
+    Lats in degrees (nlat_north,nlat_south)
+    Lons in degrees (nlon_east,nlon_west)
+    """
+    latslice = slice(lats[0],lats[1]) # Latitude is stored descending (90:-90)
+    print(latslice)
+    lonslice = slice(lons[0],lons[1]) # Longitude is stored ascending (0:360)
+    print(f'attempt patch selection lat:{latslice}, lon:{lonslice}')
+    array = array.sel(latitude = latslice, longitude = lonslice)
+    return array
+
+def preprocess_ecmwf_box(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = ((0, 360),(90,-90)) ):
+    """
+    Patchsize in tuple ((lon_e, lon_w), (lat_n,lat_s)), if fixed_patch, this uses sel to select the patch with the indicated coords
+    Preprocessing should prevent data leakage from hindcasts to forecasts.
+    """
+    assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
+    datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
+    #var = 'tcw'
+    hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
+    forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
+
+    # Patch selection, currently one of the early steps to limit memory usage
+    if (type(patchsize[0]) != tuple):
+        hindcast = select_centered_patch(hindcast, patchsize = patchsize)
+        forecast = select_centered_patch(forecast, patchsize = patchsize)
+    else:
+        hindcast = select_patch(hindcast, lons = patchsize[0], lats = patchsize[1])
+        forecast = select_patch(forecast, lons = patchsize[0], lats = patchsize[1])
+
+    if rm_season:
+        hindcast, exp = remove_seasonality(hindcast)
+        forecast, _ = remove_seasonality(forecast, expectation = exp) # Will form the test set, so not used for seasonal expectations
+
+    if ensmean:
+        hindcast = hindcast.mean('realization')
+        forecast = forecast.mean('realization')
+
+    if standardize_space or standardize_time: # Standardizing spatially means that each valid time is its own feature, therefore no leakage from hindcast to forecast, and no supply of pretrained_scaler
+        hindcast, trained_scaler = standardize_array(array = hindcast, spatially = standardize_space, temporally = standardize_time)
+        forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
+
+    return hindcast, forecast
+
 def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40) ):
     """
     Patchsize in degrees (nlon,nlat), if fixed_patch, this is centered over the Horn of Africa
