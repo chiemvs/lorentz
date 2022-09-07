@@ -80,10 +80,24 @@ def select_centered_patch(array, patchsize: tuple = (40,40)):
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
-def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40) ):
+def select_patch_specific_latlon(array,latmin,latmax,lonmin,lonmax):
+
+    """
+    Patchsize in degrees (nlon,nlat)
+    """
+    latslice = slice(latmax,latmin) # Latitude is stored descending (90:-90)
+    lonslice = slice(lonmin,lonmax) # Longitude is stored ascending (0:360)
+    print(f'attempt patch selection lat:{latslice}, lon:{lonslice}')
+    array = array.sel(latitude = latslice, longitude = lonslice)
+    return array
+
+def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40),latmin:LAT1, latmax:LAT2, lonmin:LON1, lonmax:LON2):
     """
     Patchsize in degrees (nlon,nlat), if fixed_patch, this is centered over the Horn of Africa
     Preprocessing should prevent data leakage from hindcasts to forecasts.
+    
+    
+    
     """
     assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
