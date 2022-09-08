@@ -91,7 +91,7 @@ def select_patch_specific_latlon(array,latmin,latmax,lonmin,lonmax):
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
-def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False,season: str = None, patchsize: Union[tuple,int] = 27, fill_value: float = -999.0):
+def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False,season: str = None, patchsize: Union[tuple,int] = 40, fill_value: float = -999.0):
     """
     patchsize can be intereger -> then square patch of number of cells
     or it can be a tuple of tuples -> ((latmin, latmax),(lonmin, lonmax))
@@ -147,13 +147,13 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
         mask = xr.open_dataarray('/data/volume_2/masks/laoc_mask_1.5deg.nc').reindex_like(hindcast_subset)
         hindcast_subset = hindcast_subset.where(mask == to_be_kept, fill_value)
         forecast_subset = forecast_subset.where(mask == to_be_kept, fill_value)
-    # Any final missing values are just set to zero, when normalization
+    # Any final missing values are set to the fillvalue (!!!) (this step makes the above lines obsolete. Not sure if we want to keep this always.
+    hindcast_subset = hindcast_subset.fillna(fill_value)
+    forecast_subset = forecast_subset.fillna(fill_value)
 
     return hindcast_subset, forecast_subset
 
-
-def unprocessed_forecast(var: str, fixed_patch: bool = True, patchsize: tuple = (40,40), ensmean: bool = True):
-    assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
+def unprocessed_forecast(var: str, patchsize: tuple = (40,40), ensmean: bool = True):
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
     hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
     forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
@@ -167,6 +167,13 @@ def unprocessed_forecast(var: str, fixed_patch: bool = True, patchsize: tuple = 
 
     return hindcast, forecast
 
+def select_box_of_chris(array):
+    # Needs to check if latitude is decreasing
+    if np.all(np.diff(array.coords['latitude'].values) < 0):
+        return array.sel(latitude=slice(8,-5), longitude=slice(38,53))
+    else:
+        return array.sel(latitude=slice(-5,8), longitude=slice(38,53))
+
 def spatial_average_in_mask(array, maskname):
     """Finds masks in the observational directory """
     datapath = Path('/data/volume_2/observational/')
@@ -176,50 +183,44 @@ def spatial_average_in_mask(array, maskname):
     spatial_avg = array.groupby(mask).mean().sel(mask = True)
     return spatial_avg
 
-def preprocess_target(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile_edges = [0.33,0.66], return_edges: bool = False):
+def preprocess_target(return_edges: bool = True):
     """
-    Currently not a target patch, just a scalar through spatial aggregation
-    This scaler is classified according its tercile edges (estimated per month)
+    No preprocessing going on. This happened in the notebook of sem. Only loading of the ouput file
+    Procedure:
+    tp = tp.sel(latitude=slice(-5,8), longitude=slice(38,53))
+    tp_sm = tp.mean(dim=('latitude', 'longitude'))
+    tp_rm = tp_sm.rolling({'time':28}, min_periods=1, center=True).mean()
+    quantiles = tp_rm.groupby(tp_rm.time.dt.dayofyear).quantile(q=.33, dim='time', skipna=True)
+    tp_tercile = (tp_rm.groupby(tp_rm.time.dt.dayofyear) < quantiles).astype(int).drop('dayofyear').drop('quantile')
+    ds = tp_tercile.to_dataset(name='binary')
+    ds['tp_28d_rm'] = tp_rm
+    ds['quantile'] = quantiles
+    ds['spatial_mean_raw'] = tp_sm
     """
-    datapath = Path('/data/volume_2/observational/')
-    chirps = xr.open_dataarray(datapath / 'preprocessed' / 'chirps_tp_2000-2020_4weekly_0.25deg_africa.nc')
-    spatial_avg = spatial_average_in_mask(chirps, maskname = maskname)
-    spatial_avg.coords['month'] = ('valid_time', spatial_avg.coords['valid_time'].dt.month.values)
+    basepath = Path('/data/volume_2/')
+    forecast_timestamps = pd.read_hdf(basepath / 'subseasonal/ecmwf/aggregated/aggregation_timestamps.h5')
+    semsset = xr.open_dataset(basepath / "observational/chrips_1981-2021_target_new_left.nc", engine='netcdf4') # Assuming left stamps.
+    semsset = semsset.rename({"time":"valid_time"})
 
-    hindcast_forecast_split = pd.Timestamp('2020-01-16') # In terms of valid_time
-    target_hindcast = spatial_avg.sel(valid_time = slice(None,hindcast_forecast_split))
-    target_forecast = spatial_avg.sel(valid_time = slice(hindcast_forecast_split,None))
-    
-    tercile_edges = target_hindcast.groupby('month').quantile(quantile_edges) # Determined on hindcast (to prevent leakage to forecast), also per month to account for seasonality 
+    target_hindcast = semsset['binary'].sel(valid_time = forecast_timestamps.loc[(forecast_timestamps['type'] == 'hindcast'),'aggregation_start_inclusive'].sort_values().values)
+    target_forecast = semsset['binary'].sel(valid_time = forecast_timestamps.loc[(forecast_timestamps['type'] == 'forecast'),'aggregation_start_inclusive'].sort_values().values)
 
-    def lookup_month_and_digitize(array, edges):
-        """ 
-        function to be mapped, returns an array with the same
-        dimensions, only values replaced by integers.
-        for instance if tercile edges are supplied:
-        2 = upper, 1 = middle, 0 = lower tercile
-        """
-        month = int(np.unique(array.month.values))
-        edges_month = edges.loc[month].values
-        binned = np.digitize(x = array, bins = edges_month)
-        return xr.DataArray(binned, dims = array.dims, coords = array.coords)
-
-    target_hindcast_binned = target_hindcast.groupby('month').map(lookup_month_and_digitize, edges = tercile_edges)
-    target_forecast_binned = target_forecast.groupby('month').map(lookup_month_and_digitize, edges = tercile_edges)
+    edges = semsset['quantile']
+    edges = edges.expand_dims(dim = {'quantile':[0.33]}, axis = -1) # Hardcoded, is what Sem used
 
     # One hot encoding of the classes
-    nclasses = len(quantile_edges) + 1
-    target_hindcast_encoded = xr.DataArray(tf.one_hot(target_hindcast_binned, depth = nclasses), dims = target_hindcast_binned.dims + ('classes',), coords = target_hindcast_binned.coords) 
+    nclasses = len(np.unique(semsset['binary'])) 
+    target_hindcast_encoded = xr.DataArray(tf.one_hot(target_hindcast, depth = nclasses), dims = target_hindcast.dims + ('classes',), coords = target_hindcast.coords) 
     target_hindcast_encoded.coords['classes'] = ('classes',pd.RangeIndex(nclasses))
-    target_forecast_encoded = xr.DataArray(tf.one_hot(target_forecast_binned, depth = nclasses), dims = target_forecast_binned.dims + ('classes',), coords = target_forecast_binned.coords) 
+    target_forecast_encoded = xr.DataArray(tf.one_hot(target_forecast, depth = nclasses), dims = target_forecast.dims + ('classes',), coords = target_forecast.coords) 
     target_forecast_encoded.coords['classes'] = ('classes',pd.RangeIndex(nclasses))
 
     if return_edges:
-        return target_hindcast_encoded, target_forecast_encoded, tercile_edges
+        return target_hindcast_encoded, target_forecast_encoded, edges
     else:
         return target_hindcast_encoded, target_forecast_encoded
 
-def preprocess_raw_forecasts(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile_edges = [0.33,0.66], return_edges : bool = False):
+def preprocess_raw_forecasts(quantile_edges = [0.33], return_edges : bool = False):
     """
     Extracting the raw probability forecasts for our categorical precipitation target 
     not used as inputs for postprocessing, but instead as a benchmark
@@ -228,11 +229,15 @@ def preprocess_raw_forecasts(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
     var = 'tp' 
     hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
+    hindcast = select_box_of_chris(hindcast)
     forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
+    forecast = select_box_of_chris(forecast)
 
-    hindcast_avg = spatial_average_in_mask(hindcast, maskname = maskname) 
+    mask = xr.open_dataarray('/data/volume_2/masks/laoc_mask_1.5deg.nc').reindex_like(hindcast)
+
+    hindcast_avg = hindcast.where(mask == 1, np.nan).mean(['latitude','longitude'])
     hindcast_avg.coords['month'] = ('valid_time', hindcast_avg.coords['valid_time'].dt.month.values) # Adding these coordinates because of per-month estimation
-    forecast_avg = spatial_average_in_mask(forecast, maskname = maskname) 
+    forecast_avg = forecast.where(mask == 1, np.nan).mean(['latitude','longitude'])
     forecast_avg.coords['month'] = ('valid_time', forecast_avg.coords['valid_time'].dt.month.values)
 
     nclasses = len(quantile_edges) + 1
@@ -266,7 +271,7 @@ if __name__  == '__main__': # Running as script, not calling from a notebook.
     outdir = Path('/scratch/cvanstraat')
     experiment_name = 'test'
     ensmean = True
-    varlist = ['sst','sm20']
+    varlist = ['sst']
 
     # Construction of inputs
     training_inputs = {key:[] for key in varlist}  # These will be hindcasts
@@ -291,11 +296,9 @@ if __name__  == '__main__': # Running as script, not calling from a notebook.
         #testing_inputs = testing_inputs.rename({'variable':'channels'})
     
     # processing target, checking correspondence of time axes
-    target_h, target_f = preprocess_target(quantile_edges = [0.33,0.66], return_edges = False)
-    assert np.all(np.equal(target_h.valid_time.values, training_inputs.valid_time.values)), 'training timestamps must match'
-    assert np.all(np.equal(target_f.valid_time.values, testing_inputs.valid_time.values)), 'testing timestamps must match'
+    target_h, target_f = preprocess_target(return_edges = False)
     
-    hindcast_benchmark, forecast_benchmark = preprocess_raw_forecasts(quantile_edges = [0.33,0.66], return_edges = False)
+    #hindcast_benchmark, forecast_benchmark = preprocess_raw_forecasts(quantile_edges = [0.33,0.66], return_edges = False)
     
     # Re-ordering and writing inputs to disk (only array, no coordinates, so directly readable with numpy (and tensorflow)
     # (nsamples,nlat,nlon,nchannels)
