@@ -123,6 +123,10 @@ def preprocess_ecmwf_box(var: str, rm_season: bool = True, ensmean: bool = False
         hindcast, trained_scaler = standardize_array(array = hindcast, spatially = standardize_space, temporally = standardize_time)
         forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
 
+    #fill nans
+    hindcast = hindcast.fillna(-999)
+    forecast = forecast.fillna(-999)
+    
     return hindcast, forecast
 
 def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40) ):
@@ -151,7 +155,11 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
     if standardize_space or standardize_time: # Standardizing spatially means that each valid time is its own feature, therefore no leakage from hindcast to forecast, and no supply of pretrained_scaler
         hindcast, trained_scaler = standardize_array(array = hindcast, spatially = standardize_space, temporally = standardize_time)
         forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
-        
+    
+    #fill nans
+    hindcast = hindcast.fillna(-999)
+    forecast = forecast.fillna(-999)
+    
     return hindcast, forecast
 
 def spatial_average_in_mask(array, maskname):
@@ -248,6 +256,7 @@ def preprocess_raw_forecasts(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile
         return hindcast_probabilities, forecast_probabilities, tercile_edges
     else:
         return hindcast_probabilities, forecast_probabilities
+
 
 if __name__  == '__main__': # Running as script, not calling from a notebook.
     outdir = Path('/scratch/')
