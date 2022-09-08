@@ -4,6 +4,7 @@ import pandas as pd
 import tensorflow as tf
 
 from pathlib import Path
+from typing import Union, Tuple
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 # All functions and data concern a single lead time, and a single 4-week time aggregation (pre-aggregated)
@@ -69,31 +70,45 @@ def standardize_array(array, spatially = True, temporally = False, trained_scale
     stacked.values = trained_scaler.transform(stacked) # Actual transformation
     return stacked.unstack('samples').unstack('features'), trained_scaler
 
-def select_centered_patch(array, patchsize: tuple = (40,40)):
+def select_square_centered_patch(array, patchsize: int = 40):
     """
     Patchsize in degrees (nlon,nlat)
     """
-    center_HoA = {'latitude':4.511,'longitude':40.496}
-    latslice = slice(center_HoA['latitude'] + patchsize[1]/2, center_HoA['latitude'] - patchsize[1]/2) # Latitude is stored descending (90:-90)
-    lonslice = slice(center_HoA['longitude'] - patchsize[0]/2, center_HoA['longitude'] + patchsize[0]/2) # Longitude is stored ascending (0:360)
+    center_HoA = {'latitude':1.5,'longitude':46.0}
+    latslice = slice(center_HoA['latitude'] + patchsize/2, center_HoA['latitude'] - patchsize/2) # Latitude is stored descending (90:-90)
+    lonslice = slice(center_HoA['longitude'] - patchsize/2, center_HoA['longitude'] + patchsize/2) # Longitude is stored ascending (0:360)
     print(f'attempt patch selection lat:{latslice}, lon:{lonslice}')
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
-def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False, fixed_patch: bool = True, patchsize: tuple = (40,40) ):
+def select_patch_specific_latlon(array,latmin,latmax,lonmin,lonmax):
     """
-    Patchsize in degrees (nlon,nlat), if fixed_patch, this is centered over the Horn of Africa
+    Patchsize in degrees (nlon,nlat)
+    """
+    latslice = slice(latmax,latmin) # Latitude is stored descending (90:-90)
+    lonslice = slice(lonmin,lonmax) # Longitude is stored ascending (0:360)
+    print(f'attempt patch selection lat:{latslice}, lon:{lonslice}')
+    array = array.sel(latitude = latslice, longitude = lonslice)
+    return array
+
+def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False,season: str = None, patchsize: Union[tuple,int] = 27, fill_value: float = -999.0):
+    """
+    patchsize can be intereger -> then square patch of number of cells
+    or it can be a tuple of tuples -> ((latmin, latmax),(lonmin, lonmax))
     Preprocessing should prevent data leakage from hindcasts to forecasts.
     """
-    assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
-    #var = 'tcw'
     hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
     forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
 
     # Patch selection, currently one of the early steps to limit memory usage
-    hindcast = select_centered_patch(hindcast, patchsize = patchsize)
-    forecast = select_centered_patch(forecast, patchsize = patchsize)
+    if isinstance(patchsize,int):
+        hindcast = select_square_centered_patch(hindcast, patchsize)
+        forecast = select_square_centered_patch(forecast, patchsize)
+    else:
+        hindcast = select_patch_specific_latlon(hindcast, *patchsize[0], *patchsize[1])
+        forecast = select_patch_specific_latlon(forecast, *patchsize[0], *patchsize[1])
+        #forecast = select_patch_specific_latlon(forecast, latmin=latmin,latmax=latmax,lonmin=lonmin,lonmax=lonmax)
 
     if rm_season:
         hindcast, exp = remove_seasonality(hindcast)
@@ -106,7 +121,50 @@ def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, st
     if standardize_space or standardize_time: # Standardizing spatially means that each valid time is its own feature, therefore no leakage from hindcast to forecast, and no supply of pretrained_scaler
         hindcast, trained_scaler = standardize_array(array = hindcast, spatially = standardize_space, temporally = standardize_time)
         forecast, _ = standardize_array(array = forecast, spatially = standardize_space, temporally = standardize_time, trained_scaler = None if standardize_space else trained_scaler)
-        
+
+    # Subset the data by season. (if supplied)
+    if season == 'MAM':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([3,4,5]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([3,4,5]),drop=True)
+    elif season == 'OND':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([10,11,12]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([10,11,12]),drop=True)
+    elif season == 'JJAS':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([6,7,8,9]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([6,7,8,9]),drop=True)
+    elif season == 'JF':
+        hindcast_subset = hindcast.where(hindcast.coords['valid_time'].dt.month.isin([1,2]),drop=True)
+        forecast_subset = forecast.where(forecast.coords['valid_time'].dt.month.isin([1,2]),drop=True)
+    else:
+        print('season not defined so defaulted to full year')
+        hindcast_subset = hindcast
+        forecast_subset = forecast
+
+    # Working with missing values
+    # Potentially there are 'lake' points on the land surface where sm100/sm20 will have nan, and where the ocean-based mask will not work. 
+    if var in ['sst','sm20','sm100']:
+        to_be_kept = 0 if (var == 'sst') else 1
+        mask = xr.open_dataarray('/data/volume_2/masks/laoc_mask_1.5deg.nc').reindex_like(hindcast_subset)
+        hindcast_subset = hindcast_subset.where(mask == to_be_kept, fill_value)
+        forecast_subset = forecast_subset.where(mask == to_be_kept, fill_value)
+    # Any final missing values are just set to zero, when normalization
+
+    return hindcast_subset, forecast_subset
+
+
+def unprocessed_forecast(var: str, fixed_patch: bool = True, patchsize: tuple = (40,40), ensmean: bool = True):
+    assert fixed_patch, 'currently only a fixed patch is supported' # To support variable patches, the order needs to be changed, e.g. rm season for all gridcells, later spatial subsetting
+    datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
+    hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
+    forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
+
+    # Patch selection, currently one of the early steps to limit memory usage
+    hindcast = select_centered_patch(hindcast, patchsize = patchsize)
+    forecast = select_centered_patch(forecast, patchsize = patchsize)
+    if ensmean:
+        hindcast = hindcast.mean('realization')
+        forecast = forecast.mean('realization')
+
     return hindcast, forecast
 
 def spatial_average_in_mask(array, maskname):
@@ -168,7 +226,7 @@ def preprocess_raw_forecasts(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile
     edge estimation based on hindcast, and per month, all members used for estimating probability of a certain class
     """
     datadir = Path( '/data/volume_2/subseasonal/ecmwf/aggregated/')
-    var = 'tcw' 
+    var = 'tp' 
     hindcast = xr.open_dataarray(datadir / 'hindcast' / f'ecmwf-hindcast-{var}-week3456.nc')
     forecast = xr.open_dataarray(datadir / 'forecast' / f'ecmwf-forecast-{var}-week3456.nc') 
 
@@ -205,19 +263,17 @@ def preprocess_raw_forecasts(maskname = 'era5_hoa_dry_mask_0.25deg.nc', quantile
         return hindcast_probabilities, forecast_probabilities
 
 if __name__  == '__main__': # Running as script, not calling from a notebook.
-    outdir = Path('/scratch/')
-    experiment_name = 'trial2_ensmean'
+    outdir = Path('/scratch/cvanstraat')
+    experiment_name = 'test'
     ensmean = True
-    varlist = ['tp','sst','tcw']
+    varlist = ['sst','sm20']
 
     # Construction of inputs
     training_inputs = {key:[] for key in varlist}  # These will be hindcasts
     testing_inputs = {key:[] for key in varlist}  # These will be forecasts (though probably more testing data will be generated through crossvalidation of hindcasts)
     for var in varlist:
-        if var == 'tp': # No seasonal anomalies
-            hindcast, forecast = preprocess_ecmwf(var = var, rm_season = False, ensmean = ensmean, standardize_space = False, standardize_time = True) # No seasonal removal for rainfall? Perhaps rainfall should be min-max scaled, such that zero is really zero?
-        else:
-            hindcast, forecast = preprocess_ecmwf(var = var, rm_season = True, ensmean = ensmean, standardize_space = False, standardize_time = True)
+        hindcast, forecast = preprocess_ecmwf(var = var, rm_season = True, ensmean = ensmean, standardize_space = False, standardize_time = True, patchsize = 27)
+        #h, f, m = preprocess_ecmwf(var = var, rm_season = True, ensmean = ensmean, standardize_space = False, standardize_time = True, patchsize = ((-5,8),(38,53))) # latmin, latmax, lonmin, lonmax
         training_inputs[var] = hindcast.expand_dims({'variable':[var]})
         testing_inputs[var] = forecast.expand_dims({'variable':[var]})
     
@@ -225,14 +281,14 @@ if __name__  == '__main__': # Running as script, not calling from a notebook.
     testing_inputs = xr.concat(testing_inputs.values(), dim = 'variable')
     
     # Extra stacking of channels, as multiple members available per variable
-    if not ensmean:
-        nmembers = len(training_inputs.coords['realization'])
-        training_inputs = training_inputs.stack({'channels':['realization','variable']})
-        testing_inputs = testing_inputs.sel(realization = np.random.choice(testing_inputs.realization.values, size = nmembers, replace = False)) # Testing now needs to be matched in training, so downsampling the members to 11 (always select control?)
-        testing_inputs = testing_inputs.stack({'channels':['realization','variable']})
-    else:
-        training_inputs = training_inputs.rename({'variable':'channels'})
-        testing_inputs = testing_inputs.rename({'variable':'channels'})
+    #if not ensmean:
+        #nmembers = len(training_inputs.coords['realization'])
+        #training_inputs = training_inputs.stack({'channels':['realization','variable']})
+        #testing_inputs = testing_inputs.sel(realization = np.random.choice(testing_inputs.realization.values, size = nmembers, replace = False)) # Testing now needs to be matched in training, so downsampling the members to 11 (always select control?)
+        #testing_inputs = testing_inputs.stack({'channels':['realization','variable']})
+    #else:
+        #training_inputs = training_inputs.rename({'variable':'channels'})
+        #testing_inputs = testing_inputs.rename({'variable':'channels'})
     
     # processing target, checking correspondence of time axes
     target_h, target_f = preprocess_target(quantile_edges = [0.33,0.66], return_edges = False)
@@ -243,17 +299,17 @@ if __name__  == '__main__': # Running as script, not calling from a notebook.
     
     # Re-ordering and writing inputs to disk (only array, no coordinates, so directly readable with numpy (and tensorflow)
     # (nsamples,nlat,nlon,nchannels)
-    np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose('valid_time','latitude','longitude','channels').values)
-    np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose('valid_time','latitude','longitude','channels').values)
+    #np.save(file = outdir / f'{experiment_name}.training_inputs.npy', arr = training_inputs.transpose('valid_time','latitude','longitude','channels').values)
+    #np.save(file = outdir / f'{experiment_name}.testing_inputs.npy', arr = testing_inputs.transpose('valid_time','latitude','longitude','channels').values)
     
     # writing targets to disk (nsamples, nclasses)
-    np.save(file = outdir / f'{experiment_name}.training_terciles.npy', arr = target_h.values)
-    np.save(file = outdir / f'{experiment_name}.testing_terciles.npy', arr = target_f.values)
+    #np.save(file = outdir / f'{experiment_name}.training_terciles.npy', arr = target_h.values)
+    #np.save(file = outdir / f'{experiment_name}.testing_terciles.npy', arr = target_f.values)
     
     # Writing benchmarks to disk (nsamples, nclasses), not as numpy but as pandas because no feeding into neural network
-    hindcast_benchmark.to_pandas().to_hdf(outdir / f'{experiment_name}.training_benchmark.h5', key = 'benchmark', mode = 'w')
-    forecast_benchmark.to_pandas().to_hdf(outdir / f'{experiment_name}.testing_benchmark.h5', key = 'benchmark', mode = 'w')
+    #hindcast_benchmark.to_pandas().to_hdf(outdir / f'{experiment_name}.training_benchmark.h5', key = 'benchmark', mode = 'w')
+    #forecast_benchmark.to_pandas().to_hdf(outdir / f'{experiment_name}.testing_benchmark.h5', key = 'benchmark', mode = 'w')
     
     # Some extra time information
-    target_h.valid_time.to_pandas().to_hdf(outdir / f'{experiment_name}.training_timestamps.h5', key = 'timestamps', mode = 'w')
-    target_f.valid_time.to_pandas().to_hdf(outdir / f'{experiment_name}.testing_timestamps.h5', key = 'timestamps', mode = 'w')
+    #target_h.valid_time.to_pandas().to_hdf(outdir / f'{experiment_name}.training_timestamps.h5', key = 'timestamps', mode = 'w')
+    #target_f.valid_time.to_pandas().to_hdf(outdir / f'{experiment_name}.testing_timestamps.h5', key = 'timestamps', mode = 'w')
