@@ -33,7 +33,7 @@ DEFAULT_COMPILE = dict(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
             metrics = ['accuracy'],
             loss = tf.keras.losses.CategoricalCrossentropy(from_logits = False))
 
-DEFAULT_CONSTRUCT = dict(n_classes = 3, n_initial_filters = 4, n_conv_blocks = 3, n_hidden_fcn_layers = 0, n_hidden_nodes = 10, dropout_rate = 0.3)
+DEFAULT_CONSTRUCT = dict(n_classes = 2, n_initial_filters = 4, n_conv_blocks = 3, n_hidden_fcn_layers = 0, n_hidden_nodes = 10, dropout_rate = 0.3)
 
 def construct_climdev_cnn(n_classes: int, n_initial_filters: int, n_conv_blocks: int, n_hidden_fcn_layers: int, n_hidden_nodes: int, inputshape: tuple, dropout_rate: float = 0.3):
     """
@@ -58,8 +58,8 @@ def construct_climdev_cnn(n_classes: int, n_initial_filters: int, n_conv_blocks:
     x = tf.keras.layers.Flatten()(x)
     for i in range(n_hidden_fcn_layers): # Fully connected
         x = tf.keras.layers.Dropout(dropout_rate)(x)
-        x = tf.keras.layers.Dense(units = n_hidden_nodes, activation='elu', kernel_initializer = weights_initializer)(x) # was units = n_features, but not logical to scale with predictors. 10 is choice in Scheuerer 2020 (with 20 outputs)
-    x = tf.keras.layers.Dense(units = n_classes, activation='elu', kernel_initializer = weights_initializer)(x) # Last fully connected building up to output
+        x = tf.keras.layers.Dense(units = n_hidden_nodes, activation='elu', kernel_initializer = weights_initializer, bias_initializer = bias_initializer)(x) # was units = n_features, but not logical to scale with predictors. 10 is choice in Scheuerer 2020 (with 20 outputs)
+    x = tf.keras.layers.Dense(units = n_classes, activation='elu', kernel_initializer = weights_initializer, bias_initializer = bias_initializer)(x) # Last fully connected building up to output
     pre_activation = tf.keras.layers.Add()([log_p_clim, x]) # addition: x + log_p_clim. outputs the logarithm of class probablity. Multiplicative nature seen in e.g. softmax: exp(x + log_p_clim) = exp(x)*p_clim
     prob_dist = tf.keras.layers.Activation('softmax')(pre_activation) # normalized to sum to 1
 
@@ -159,7 +159,8 @@ class ModelRegistry(object):
         return pd.DataFrame(predictions, index = combined_stamps)
 
 if __name__ == '__main__':
-    scratchdir = Path('/scratch')
+    print(tf.config.list_physical_devices("GPU"))
+    scratchdir = Path('/scratch/cvanstraat')
     # Loading of preprocessed data, check preprocessing.py for the options like removing seasonal cycle and normalization in time or space
     chosen_experiment = 'trial2_ensmean'
     """
