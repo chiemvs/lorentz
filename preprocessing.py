@@ -70,7 +70,7 @@ def standardize_array(array, spatially = True, temporally = False, trained_scale
     stacked.values = trained_scaler.transform(stacked) # Actual transformation
     return stacked.unstack('samples').unstack('features'), trained_scaler
 
-def select_square_centered_patch(array, patchsize: int = 40):
+def select_square_centered_patch(array, patchsize: float = 40):
     """
     Patchsize in degrees (nlon,nlat)
     """
@@ -91,9 +91,9 @@ def select_patch_specific_latlon(array,latmin,latmax,lonmin,lonmax):
     array = array.sel(latitude = latslice, longitude = lonslice)
     return array
 
-def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False,season: str = None, patchsize: Union[tuple,int] = 40, fill_value: float = -999.0):
+def preprocess_ecmwf(var: str, rm_season: bool = True, ensmean: bool = False, standardize_space: bool = False, standardize_time: bool = False,season: str = None, patchsize: Union[tuple,float] = 40, fill_value: float = -999.0):
     """
-    patchsize can be intereger -> then square patch of number of cells
+    patchsize can be a single float (degrees) -> then square patch 
     or it can be a tuple of tuples -> ((latmin, latmax),(lonmin, lonmax))
     Preprocessing should prevent data leakage from hindcasts to forecasts.
     """
@@ -201,6 +201,7 @@ def preprocess_target(return_edges: bool = True):
     forecast_timestamps = pd.read_hdf(basepath / 'subseasonal/ecmwf/aggregated/aggregation_timestamps.h5')
     semsset = xr.open_dataset(basepath / "observational/chrips_1981-2021_target_new_left.nc", engine='netcdf4') # Assuming left stamps.
     semsset = semsset.rename({"time":"valid_time"})
+    semsset['binary'] = 1 - semsset['binary'] # Such that 0 is the drought class 
 
     target_hindcast = semsset['binary'].sel(valid_time = forecast_timestamps.loc[(forecast_timestamps['type'] == 'hindcast'),'aggregation_start_inclusive'].sort_values().values)
     target_forecast = semsset['binary'].sel(valid_time = forecast_timestamps.loc[(forecast_timestamps['type'] == 'forecast'),'aggregation_start_inclusive'].sort_values().values)
