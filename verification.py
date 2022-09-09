@@ -36,7 +36,7 @@ def reliability_diagram(y, x, nbins=11, nmin=50):
         ax = fig.add_subplot(1,3,1+icat)
         rel = plt.plot(relia['prob'].dropna(), relia['obs'].dropna(), '-o', c='royalblue')
         plt.plot([0,1], [0,1], c='k')
-        plt.axvline(0.33, c='k', ls=':', lw=1, ymin=0.05, ymax=0.58)
+        plt.axvline(float(y[category].mean()), c='k', ls=':', lw=1, ymin=0.05, ymax=0.58)
         plt.title(f'Reliability for "{category}"\n',fontsize=14)
         ins = ax.inset_axes([0.03,0.70,0.35,0.25])
         ins.tick_params(axis='both', which='both', bottom=False, top=False, labelbottom=False, right=False, left=False, labelleft=False)

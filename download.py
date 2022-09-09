@@ -16,11 +16,11 @@ forecasttypes = ['hindcast','forecast']
 #        'Two meter temperature':'t2m',
 #        'Sea surface temperature':'sst',
 #        }
-variables = {'Total column water':'tcw',
-        'Soil moisture 20cm':'sm20',
-        'Soil moisture 100cm':'sm100',
-        }
-#variables = {'Geopotential height':'gh'}
+#variables = {'Total column water':'tcw',
+#        'Soil moisture 20cm':'sm20',
+#        'Soil moisture 100cm':'sm100',
+#        }
+variables = {'Accumulated TOA thermal rad':'ttr'}
 
 def create_filename(forecasttype, init_date, center, varname):
     init_date = init_date.strftime('%Y%m%d')
@@ -39,8 +39,8 @@ def create_url(forecasttype, init_date, center, varname):
 def create_local_path(forecasttype, init_date, center, varname):
     filename = create_filename(forecasttype = forecasttype, init_date = init_date, center = center, varname = varname)
     #path = Path('/scistor/ivm/data_catalogue/climate_models/s2s/')
-    path = Path('/data/volume_2/subseasonal/raw/')
-    return path / center / forecasttype / filename
+    path = Path('/data/volume_2/subseasonal/')
+    return path / center / 'raw' / forecasttype / filename
 
 def download(serverurl, localfile):
     if not localfile.exists():

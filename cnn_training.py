@@ -81,7 +81,6 @@ class ModelRegistry(object):
         self.construct_kwargs.update({'inputshape':xdata[0].shape[1:]}) # Model needs knowledge about the patch size (first branch) to be constructed
         self.compile_kwargs = compile_kwargs
         self.fit_kwargs = fit_kwargs
-        self.xdata = xdata # List of objects
         self.registry = [] # Containing the model objects
         self.train_indices = [] # Containing the indices of samples on which a model gets trained
         self.val_indices = [] # Containing the indices of validation samples
@@ -158,11 +157,54 @@ class ModelRegistry(object):
         combined_stamps = self.timestamps[combined_indices]
         return pd.DataFrame(predictions, index = combined_stamps)
 
+class DoubleCV(object):
+    def __init__(self, xdata: list, ydata: np.ndarray, timestamps: pd.DatetimeIndex, ntest: int = 1, nval: int = 3):
+        """
+        number of leave out test years, number of leave out validation years
+        """
+        self.xdata = xdata # list of arrays, All data in memory (small datasets so no bottleneck)
+        self.ydata = ydata # Array
+        self.timestamps = timestamps
+        self.years = timestamps.year.unique().sort_values()
+        self.testyears = np.split(self.years, np.arange(ntest, len(self.years),ntest)) # list of pandas int_index
+        self.valyears = []  # list of lists
+        for testyears in self.testyears:
+            remaining_years = self.years.drop(testyears)
+            self.valyears.append(np.split(remaining_years, np.arange(nval, len(remaining_years),nval)))
+        self.registries = [None] * len(self.testyears)
+
+    def _find_index_of_block(self, testyear: int):
+        contains = [(testyear in int_index) for int_index in self.testyears]
+        return contains.index(True)
+
+    def train_inner_loop(self, testyear: int, compile_kwargs = DEFAULT_COMPILE, construct_kwargs = DEFAULT_CONSTRUCT, fit_kwargs = DEFAULT_FIT, overwrite: bool = False):
+        """
+        Properly initialize the registry, if already present overwrite (if set to True)
+        """
+        idx = self._find_index_of_block(testyear = testyear)
+        testyear_list = self.testyears[idx] 
+        test_indices = np.where(self.timestamps.year.map(lambda y: y in testyear_list))[0] # From boolean to numeric index
+        if (not (self.registries[idx] is None)) and (not overwrite):
+            raise AttributeError(f'registry for inner loop with test: {testyear}, already exists, and overwrite is False')
+        registry = ModelRegistry(xdata = self.xdata, ydata = self.ydata, timestamps = self.timestamps, 
+                compile_kwargs = compile_kwargs, construct_kwargs = construct_kwargs, fit_kwargs = fit_kwargs)  # A single registry has one set of parameters.
+        for valyear_list in self.valyears[idx]:
+            val_indices = np.where(self.timestamps.year.map(lambda y: y in valyear_list))[0]
+            train_indices = np.setdiff1d(np.arange(len(self.timestamps)),np.concatenate([val_indices,test_indices]), assume_unique = True) 
+            modelindex = registry.initialize_untrained_model(train_indices = train_indices, val_indices = val_indices, test_indices = test_indices)
+        #registry.train_model(modelindex = modelindex)
+        self.registries[idx] = registry
+
+    def optimize_in_inner_loops(self):
+        for test_year in self.years:
+            self.train_inner_loop(testyear = test_year)
+
+
 if __name__ == '__main__':
     print(tf.config.list_physical_devices("GPU"))
     scratchdir = Path('/scratch/cvanstraat')
     # Loading of preprocessed data, check preprocessing.py for the options like removing seasonal cycle and normalization in time or space
-    chosen_experiment = 'trial2_ensmean'
+    chosen_experiment = 'trial5_ensmean_something'
     """
     Data loading, merging of the dataset. (for later crossvalidation)
     """
@@ -179,37 +221,41 @@ if __name__ == '__main__':
     full_timestamps = pd.concat([train_timestamps, test_timestamps])
     
     n_classes = full_target.shape[-1] 
-    full_clim_logprobs = generate_climprob_inputs(full_inputs, climprobs = np.repeat(1/n_classes, n_classes)) # 3 classes are assumed to be equiprobable terciles
+    full_clim_logprobs = generate_climprob_inputs(full_inputs, climprobs = full_target.mean(axis = 0)) # 3 classes are assumed to be equiprobable terciles
     
     registry = ModelRegistry(xdata = [full_inputs, full_clim_logprobs], 
             ydata = full_target, 
             timestamps = full_timestamps.index,
             compile_kwargs = DEFAULT_COMPILE, construct_kwargs = DEFAULT_CONSTRUCT, fit_kwargs = DEFAULT_FIT)
+
+    self = DoubleCV(xdata = [full_inputs, full_clim_logprobs], 
+            ydata = full_target, 
+            timestamps = full_timestamps.index, ntest = 2, nval = 5)
     
     # Leave one year out cross-validation (for testing)
     # This leaves 21 years remaining, although there are not really 22 full years (2021 has only three samples)
     # nested within this, a leave-three-years-out crossvalidation (meaning 7 folds)
-    years = full_timestamps.index.year.unique()
-    for test_year in years:
-        remaining_years = years.drop(test_year).sort_values() # sort to make sure that the next leaving out is blockwise
-        for validation_years in np.split(remaining_years, np.arange(3, len(remaining_years),3)):
-            training_years = years.drop(test_year).drop(validation_years)
-            print('test', test_year)
-            print('validation', validation_years)
-            print('training', training_years)
-            test_indices = np.where(full_timestamps.index.year == test_year)[0] # From boolean to numeric index
-            val_indices = np.where(full_timestamps.index.year.map(lambda y: y in validation_years))[0]
-            train_indices = np.where(full_timestamps.index.year.map(lambda y: y in training_years))[0]
-            modelindex = registry.initialize_untrained_model(train_indices = train_indices, val_indices = val_indices, test_indices = test_indices)
-            print(modelindex)
+    #years = full_timestamps.index.year.unique()
+    #for test_year in years:
+        #remaining_years = years.drop(test_year).sort_values() # sort to make sure that the next leaving out is blockwise
+        #for validation_years in np.split(remaining_years, np.arange(3, len(remaining_years),3)):
+            #training_years = years.drop(test_year).drop(validation_years)
+            #print('test', test_year)
+            #print('validation', validation_years)
+            #print('training', training_years)
+            #test_indices = np.where(full_timestamps.index.year == test_year)[0] # From boolean to numeric index
+            #val_indices = np.where(full_timestamps.index.year.map(lambda y: y in validation_years))[0]
+            #train_indices = np.where(full_timestamps.index.year.map(lambda y: y in training_years))[0]
+            #modelindex = registry.initialize_untrained_model(train_indices = train_indices, val_indices = val_indices, test_indices = test_indices)
+            #print(modelindex)
             # Normally you would call train here. But there are a lot of models (6 min of training with 10 epochs)
-            registry.train_model(modelindex = modelindex)
+            #registry.train_model(modelindex = modelindex)
     
     # Two examples of training
     #registry.train_model(modelindex = 0)
     #registry.train_model(modelindex = 5)
     # And an example of the training curves, which are scores computed per set of predictions
-    curves = registry.build_curves()
+    #curves = registry.build_curves()
     
     # But of course we are doing crossvalidation, which means that we first want to make a complete (joint) set of predictions, and compute scores once
     # Verification is possible for a certain set all in one go
